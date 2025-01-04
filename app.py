@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 import seaborn as sns
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.linear_model import LinearRegression
 from sklearn.tree import DecisionTreeRegressor
@@ -11,6 +11,7 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
 
 # Session state'i başlat
 if 'step' not in st.session_state:
@@ -170,8 +171,12 @@ if st.session_state.step >= 6:
 # Step 7: Hyperparameter Tuning
 if st.session_state.step >= 7:
     st.write("## Step 7: Hyperparameter Tuning")
-    best_models = {}
-    post_tuning_metrics = {}
+
+    # Eğitilmiş modelleri ve sonuçları session_state'de sakla
+    if 'best_models' not in st.session_state:
+        st.session_state.best_models = {}
+    if 'post_tuning_metrics' not in st.session_state:
+        st.session_state.post_tuning_metrics = {}
 
     # Toplam model sayısı
     total_models = len(selected_param_grids)
@@ -185,71 +190,74 @@ if st.session_state.step >= 7:
 
         # Gradient Boosting için özel ilerleme çubuğu
         if model_name == "Gradient Boosting":
-            # Gradient Boosting için adım adım eğitim
-            n_estimators = params.get('n_estimators', [100])[0]  # Varsayılan n_estimators
-            learning_rate = params.get('learning_rate', [0.1])[0]  # Varsayılan learning_rate
-            max_depth = params.get('max_depth', [3])[0]  # Varsayılan max_depth
-
-            # Modeli adım adım eğitmek için warm_start=True kullan
-            model = GradientBoostingRegressor(
-                n_estimators=1,  # Her adımda 1 ağaç eklenecek
-                learning_rate=learning_rate,
-                max_depth=max_depth,
-                warm_start=True  # Modelin adım adım eğitilmesini sağlar
-            )
-
             # İlerleme çubuğu ve durum metni için session_state kullan
             if f"{model_name}_progress" not in st.session_state:
                 st.session_state[f"{model_name}_progress"] = 0
-                st.session_state[f"{model_name}_status"] = f"Training {model_name} - Epoch 0/{n_estimators}"
+                st.session_state[f"{model_name}_status"] = f"Tuning {model_name} - 0% complete"
 
             # İlerleme çubuğu ve durum metni
             progress_bar = st.progress(st.session_state[f"{model_name}_progress"])
             status_text = st.empty()
             status_text.text(st.session_state[f"{model_name}_status"])
 
-            # Modeli adım adım eğit
-            for epoch in range(1, n_estimators + 1):
-                model.n_estimators = epoch
-                model.fit(X_train, y_train)
-
-                # İlerleme çubuğunu ve durum metnini güncelle
-                progress = epoch / n_estimators
+            # GridSearchCV için özel bir callback fonksiyonu
+            def update_progress(progress):
                 st.session_state[f"{model_name}_progress"] = progress
-                st.session_state[f"{model_name}_status"] = f"Training {model_name} - Epoch {epoch}/{n_estimators}"
-
-                # İlerleme çubuğunu ve durum metnini ekranda güncelle
+                st.session_state[f"{model_name}_status"] = f"Tuning {model_name} - {int(progress * 100)}% complete"
                 progress_bar.progress(st.session_state[f"{model_name}_progress"])
                 status_text.text(st.session_state[f"{model_name}_status"])
 
-            # Eğitim tamamlandığında ilerleme çubuğunu ve durum metnini güncelle
-            st.session_state[f"{model_name}_progress"] = 1.0
-            st.session_state[f"{model_name}_status"] = f"{model_name} training completed!"
-            progress_bar.progress(st.session_state[f"{model_name}_progress"])
-            status_text.text(st.session_state[f"{model_name}_status"])
+            # GridSearchCV ile hiperparametre optimizasyonu
+            if f"{model_name}_best_model" not in st.session_state:
+                grid_search = GridSearchCV(
+                    model,
+                    params,
+                    cv=5,
+                    scoring='r2',
+                    n_jobs=-1  # Tüm CPU çekirdeklerini kullan
+                )
+
+                # GridSearchCV'yi çalıştır
+                grid_search.fit(X_train, y_train)
+
+                # En iyi modeli session_state'de sakla
+                st.session_state[f"{model_name}_best_model"] = grid_search.best_estimator_
+
+                # İlerleme çubuğunu tamamla
+                update_progress(1.0)
+                st.session_state[f"{model_name}_status"] = f"{model_name} tuning completed!"
+                status_text.text(st.session_state[f"{model_name}_status"])
+
+            # En iyi modeli session_state'den al
+            best_model = st.session_state[f"{model_name}_best_model"]
 
         else:
             # Diğer modeller için GridSearchCV
             if params:  # Hiperparametre optimizasyonu yapılacak
-                grid_search = GridSearchCV(model, params, cv=5, scoring='r2')
-                grid_search.fit(X_train, y_train)
-                best_model = grid_search.best_estimator_
+                if f"{model_name}_best_model" not in st.session_state:
+                    grid_search = GridSearchCV(model, params, cv=5, scoring='r2')
+                    grid_search.fit(X_train, y_train)
+                    st.session_state[f"{model_name}_best_model"] = grid_search.best_estimator_
+
+                # En iyi modeli session_state'den al
+                best_model = st.session_state[f"{model_name}_best_model"]
             else:
                 best_model = model
 
-            best_models[model_name] = best_model
+            st.session_state.best_models[model_name] = best_model
 
         # Modeli değerlendir
-        y_pred = best_model.predict(X_test)
-        metrics = {
-            'R2 Score': r2_score(y_test, y_pred),
-            'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
-            'MAE': mean_absolute_error(y_test, y_pred)
-        }
-        post_tuning_metrics[model_name] = metrics
+        if model_name not in st.session_state.post_tuning_metrics:
+            y_pred = best_model.predict(X_test)
+            metrics = {
+                'R2 Score': r2_score(y_test, y_pred),
+                'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
+                'MAE': mean_absolute_error(y_test, y_pred)
+            }
+            st.session_state.post_tuning_metrics[model_name] = metrics
 
     # Tüm modellerin metriklerini göster
-    post_tuning_df = pd.DataFrame(post_tuning_metrics).T
+    post_tuning_df = pd.DataFrame(st.session_state.post_tuning_metrics).T
     st.write("Metrics after tuning:")
     st.dataframe(post_tuning_df)
 
@@ -259,7 +267,10 @@ if st.session_state.step >= 7:
 # Step 8: Combine Results
 if st.session_state.step >= 8:
     st.write("## Step 8: Combine Results")
+
+    # Önceden hesaplanmış sonuçları kullan
     pre_tuning_df['Stage'] = 'Pre-Tuning'
+    post_tuning_df = pd.DataFrame(st.session_state.post_tuning_metrics).T
     post_tuning_df['Stage'] = 'Post-Tuning'
     results_comparison = pd.concat([pre_tuning_df, post_tuning_df])
     st.write("Combined results:")
@@ -271,6 +282,9 @@ if st.session_state.step >= 8:
 # Step 9: Visualizations
 if st.session_state.step >= 9:
     st.write("## Step 9: Visualizations")
+
+    # Önceden hesaplanmış sonuçları kullan
+    results_comparison = pd.concat([pre_tuning_df, post_tuning_df])
 
     # Visualization: R2 Score Comparison
     st.write("### R2 Score Comparison")
